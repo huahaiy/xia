@@ -19,7 +19,8 @@
             [xia.schedule :as schedule]
             [xia.policy :as task-policy]
             [xia.task-spec :as task-spec])
-  (:import [java.util.concurrent ExecutorService Executors ScheduledExecutorService ThreadFactory TimeUnit RejectedExecutionException ThreadPoolExecutor]))
+  (:import [java.util.concurrent ExecutorService Executors RejectedExecutionException
+            ScheduledExecutorService ThreadFactory TimeUnit]))
 
 ;; ---------------------------------------------------------------------------
 ;; State
@@ -236,7 +237,7 @@
       (str output)))
 
 (defn- record-completed-schedule-run!
-  [{:keys [schedule-id started audit-log] :as plan} run-result]
+  [{:keys [schedule-id run-id started audit-log] :as plan} run-result]
   (let [{:keys [output summary success? status failure]} (run-step-values plan
                                                                           run-result)
         result-text (str (or output summary))]
@@ -251,6 +252,7 @@
                                    :result result-text
                                    :actions @audit-log
                                    :meta (schedule-run-meta plan)}
+                            run-id (assoc :run-id run-id)
                             (not success?) (assoc :error failure)))
     (if success?
       (schedule/record-task-success! schedule-id
@@ -271,7 +273,7 @@
     :error))
 
 (defn- record-exception-schedule-run!
-  [{:keys [schedule-id started audit-log] :as plan} e]
+  [{:keys [schedule-id run-id started audit-log] :as plan} e]
   (let [status (exception-status plan e)
         error  (exception-message e)]
     (schedule-run-hook! :finish
@@ -279,12 +281,13 @@
                         {:status status
                          :error error})
     (schedule/record-run! schedule-id
-                          {:started-at started
-                           :finished-at (java.util.Date.)
-                           :status status
-                           :actions @audit-log
-                           :meta (schedule-run-meta plan)
-                           :error error})
+                          (cond-> {:started-at started
+                                   :finished-at (java.util.Date.)
+                                   :status status
+                                   :actions @audit-log
+                                   :meta (schedule-run-meta plan)
+                                   :error error}
+                            run-id (assoc :run-id run-id)))
     (schedule/record-task-failure! schedule-id error)))
 
 (defn- tool-schedule-plan
@@ -368,11 +371,13 @@
 
 (defn- schedule-run-plan
   [{:keys [type] :as sched}]
-  (case type
-    :tool (tool-schedule-plan sched)
-    :prompt (prompt-schedule-plan sched)
-    (throw (ex-info "Unsupported schedule type" {:type type
-                                                 :schedule-id (:id sched)}))))
+  (let [plan (case type
+               :tool (tool-schedule-plan sched)
+               :prompt (prompt-schedule-plan sched)
+               (throw (ex-info "Unsupported schedule type" {:type type
+                                                            :schedule-id (:id sched)})))]
+    (cond-> plan
+      (:run-id sched) (assoc :run-id (:run-id sched)))))
 
 (defn- task-run-args
   [{:keys [run-context executors]}]
@@ -400,13 +405,36 @@
         (when-let [finally! (:finally! plan)]
           (finally!))))))
 
+(defn- claim-runtime-schedule!
+  [schedule-id]
+  (let [running-atom (running-schedules-atom)]
+    (loop [running @running-atom]
+      (cond
+        (contains? running schedule-id)
+        false
+
+        (compare-and-set! running-atom running (conj running schedule-id))
+        true
+
+        :else
+        (recur @running-atom)))))
+
 (defn- execute-schedule!
   "Execute a single schedule, preventing concurrent runs of the same schedule."
   [sched]
   (let [id (:id sched)]
-    (when (and (runtime-state/accepting-new-work?)
-               (not (contains? @(running-schedules-atom) id)))
-      (swap! (running-schedules-atom) conj id)
+    (cond
+      (not (runtime-state/accepting-new-work?))
+      (log/debug "Skipping schedule execution because runtime is draining"
+                 {:schedule-id id
+                  :phase (runtime-state/phase)
+                  :draining? (runtime-state/draining?)})
+
+      (not (claim-runtime-schedule! id))
+      (log/debug "Skipping schedule execution because it is already running"
+                 {:schedule-id id})
+
+      :else
       (try
         (let [started-at    (java.util.Date.)
               claimed-sched (schedule/claim-schedule-run! id started-at)]
@@ -435,12 +463,7 @@
         (catch Exception e
           (log/error e "Schedule execution failed:" (name id)))
         (finally
-          (swap! (running-schedules-atom) disj id))))
-    (when-not (runtime-state/accepting-new-work?)
-      (log/debug "Skipping schedule execution because runtime is draining"
-                 {:schedule-id id
-                  :phase (runtime-state/phase)
-                  :draining? (runtime-state/draining?)}))))
+          (swap! (running-schedules-atom) disj id))))))
 
 (defn ^:no-doc run-prompt-schedule!
   [sched]
@@ -481,15 +504,22 @@
                        (>= (- (.getTime now) (.getTime ^java.util.Date @(last-maintenance-at-atom)))
                            (long maintenance-interval-ms)))
                    (compare-and-set! (maintenance-running?-atom) false true))
-          (submit-work! "background maintenance"
-                        (fn []
-                          (try
-                            (bridge/run-memory-maintenance! now)
-                            (reset! (last-maintenance-at-atom) now)
-                            (catch Exception e
-                              (log/error e "Background maintenance failed"))
-                            (finally
-                              (reset! (maintenance-running?-atom) false))))))))
+          (try
+            (when-not (submit-work! "background maintenance"
+                                    (fn []
+                                      (try
+                                        (bridge/run-memory-maintenance! now)
+                                        (reset! (last-maintenance-at-atom) now)
+                                        (catch Exception e
+                                          (log/error e "Background maintenance failed"))
+                                        (finally
+                                          (reset! (maintenance-running?-atom) false)))))
+              ;; A rejected submission never reaches the worker's finally block.
+              ;; Release the admission claim so the next tick can retry.
+              (reset! (maintenance-running?-atom) false))
+            (catch Exception e
+              (reset! (maintenance-running?-atom) false)
+              (throw e))))))
     (catch Exception e
       (log/error e "Scheduler tick failed"))))
 

@@ -25,6 +25,16 @@
 ;; Limits
 ;; ---------------------------------------------------------------------------
 
+(def ^:private schedule-run-lock-count 64)
+(def ^:private schedule-run-locks
+  (mapv (fn [_] (Object.)) (range schedule-run-lock-count)))
+
+(defn- with-schedule-run-lock
+  [schedule-id f]
+  (let [lock-index (mod (hash schedule-id) (count schedule-run-locks))]
+    (locking (nth schedule-run-locks lock-index)
+      (f))))
+
 (defn- actions-doc
   [actions]
   {:events (vec actions)})
@@ -745,10 +755,7 @@
     (log/info "Removed schedule:" (clojure.core/name schedule-id)))
   {:status "removed" :id schedule-id})
 
-(defn claim-schedule-run!
-  "Durably reserve the next wake for a schedule before execution proceeds.
-   Returns the refreshed schedule when the claim succeeds, or nil when the
-   schedule is no longer due/runnable."
+(defn- claim-schedule-run-unlocked!
   [schedule-id ^java.util.Date started-at]
   (let [current-record (schedule-record schedule-id)
         current        (some-> current-record schedule->body)
@@ -758,14 +765,25 @@
                             (some? current-next)
                             (not (.after ^java.util.Date current-next started-at)))]
     (when due?
-      (let [reserved-next-run (cron/next-run (:spec current)
+      (let [run-id            (random-uuid)
+            reserved-next-run (cron/next-run (:spec current)
                                              started-at
                                              :last-run started-at)]
         (db/transact! (schedule-timing-tx schedule-id
                                           current-record
                                           reserved-next-run
                                           reserved-next-run))
-        (get-schedule schedule-id)))))
+        (assoc (get-schedule schedule-id) :run-id run-id)))))
+
+(defn claim-schedule-run!
+  "Durably reserve the next wake for a schedule before execution proceeds.
+   Returns the refreshed schedule and a unique `:run-id` when the claim
+   succeeds, or nil when the schedule is no longer due/runnable. Claims for one
+   schedule are serialized so concurrent ticks have exactly one winner."
+  [schedule-id ^java.util.Date started-at]
+  (with-schedule-run-lock
+    schedule-id
+    #(claim-schedule-run-unlocked! schedule-id started-at)))
 
 (defn pause-schedule!
   "Disable a schedule (stop it from running)."
@@ -790,36 +808,65 @@
 ;; Run history
 ;; ---------------------------------------------------------------------------
 
+(defn- schedule-run-record
+  [run-id]
+  (when run-id
+    (when-let [eid (ffirst (db/q '[:find ?e :in $ ?id
+                                   :where [?e :schedule-run/id ?id]]
+                                 run-id))]
+      (into {} (db/entity eid)))))
+
+(defn- record-run-unlocked!
+  [schedule-id {:keys [run-id started-at finished-at status result error actions meta]}]
+  (if-let [existing (schedule-run-record run-id)]
+    (if (= schedule-id (:schedule-run/schedule-id existing))
+      {:status :duplicate
+       :run-id run-id}
+      (throw (ex-info "Schedule run id belongs to another schedule"
+                      {:type :schedule/run-id-conflict
+                       :run-id run-id
+                       :schedule-id schedule-id
+                       :existing-schedule-id (:schedule-run/schedule-id existing)})))
+    (let [run-id          (or run-id (random-uuid))
+          current-record  (or (schedule-record schedule-id)
+                              (throw (ex-info "Schedule not found" {:id schedule-id})))
+          sched           (schedule->body current-record)
+          reserved-next   (:schedule/reserved-next-run current-record)
+          next-run        (or reserved-next
+                              (cron/next-run (:spec sched)
+                                             (java.util.Date.)
+                                             :last-run started-at))
+          history-record  (cond-> {:schedule-run/id          run-id
+                                   :schedule-run/schedule-id schedule-id
+                                   :schedule-run/started-at  started-at
+                                   :schedule-run/status      status}
+                            finished-at (assoc :schedule-run/finished-at finished-at)
+                            result      (assoc :schedule-run/result
+                                               (if (> (count (str result)) 4000)
+                                                 (subs (str result) 0 4000)
+                                                 (str result)))
+                            error       (assoc :schedule-run/error
+                                               (if (> (count (str error)) 2000)
+                                                 (subs (str error) 0 2000)
+                                                 (str error)))
+                            (some? actions) (assoc :schedule-run/actions (actions-doc actions))
+                            (some? meta) (assoc :schedule-run/meta (meta-doc meta)))]
+      ;; Persist the history row and consume the reserved wake atomically. A
+      ;; crash cannot leave a completed run without its matching timing state.
+      (db/transact! (into [history-record
+                           {:schedule/id       schedule-id
+                            :schedule/last-run started-at}]
+                          (schedule-timing-tx schedule-id current-record next-run nil)))
+      {:status :recorded
+       :run-id run-id})))
+
 (defn record-run!
-  "Record a schedule execution result."
-  [schedule-id {:keys [started-at finished-at status result error actions meta]}]
-  (db/transact!
-   [(cond-> {:schedule-run/id          (random-uuid)
-             :schedule-run/schedule-id schedule-id
-             :schedule-run/started-at  started-at
-             :schedule-run/status      status}
-      finished-at (assoc :schedule-run/finished-at finished-at)
-      result      (assoc :schedule-run/result
-                         (if (> (count (str result)) 4000)
-                           (subs (str result) 0 4000)
-                           (str result)))
-      error       (assoc :schedule-run/error
-                         (if (> (count (str error)) 2000)
-                           (subs (str error) 0 2000)
-                           (str error)))
-      (some? actions) (assoc :schedule-run/actions (actions-doc actions))
-      (some? meta) (assoc :schedule-run/meta (meta-doc meta)))])
-  ;; Update schedule's last-run and next-run
-  (let [now             (java.util.Date.)
-        current-record  (or (schedule-record schedule-id)
-                            (throw (ex-info "Schedule not found" {:id schedule-id})))
-        sched           (schedule->body current-record)
-        reserved-next   (:schedule/reserved-next-run current-record)
-        next-run        (or reserved-next
-                            (cron/next-run (:spec sched) now :last-run started-at))]
-    (db/transact! (into [{:schedule/id       schedule-id
-                          :schedule/last-run started-at}]
-                        (schedule-timing-tx schedule-id current-record next-run nil)))))
+  "Record a schedule execution result. When the durable claim's `:run-id` is
+   supplied, repeated or concurrent completion writes are idempotent."
+  [schedule-id run]
+  (with-schedule-run-lock
+    schedule-id
+    #(record-run-unlocked! schedule-id run)))
 
 (defn schedule-history
   "Get recent run history for a schedule. Returns up to `limit` most recent runs."

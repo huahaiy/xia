@@ -11,7 +11,7 @@
 
    Day matching follows standard cron semantics: if both :dom and :dow
    are restricted, match on EITHER (OR)."
-  (:import [java.time DayOfWeek LocalDateTime ZoneId]))
+  (:import [java.time DayOfWeek Instant LocalDateTime ZoneId]))
 
 ;; ---------------------------------------------------------------------------
 ;; Defaults
@@ -111,19 +111,42 @@
       (not dow-restricted?) dom-match?
       :else                 (or dom-match? dow-match?))))
 
+(defn- calendar-date-after
+  [^ZoneId zone ^LocalDateTime local-time ^Instant floor-instant]
+  (some->> (.getValidOffsets (.getRules zone) local-time)
+           (map #(.toInstant local-time %))
+           (filter #(.isAfter ^Instant % floor-instant))
+           sort
+           first
+           java.util.Date/from))
+
 (defn next-run
-  "Calculate the next run time after `after` (java.util.Date).
+  "Calculate the next run time strictly after `after` (java.util.Date) and,
+   when supplied, `last-run`.
    Returns a java.util.Date, or nil if no match within 1 year.
-   For interval specs, requires `last-run` (java.util.Date or nil)."
+   Interval schedules preserve their original cadence while skipping missed
+   slots after a forward clock jump. `last-run` prevents a backward clock jump
+   from repeating an already executed interval or calendar occurrence."
   [spec ^java.util.Date after & {:keys [last-run]}]
   (if-let [interval (:interval-minutes spec)]
-    ;; Interval mode: last-run + interval, or after + interval if no last-run
-    (let [^java.util.Date base (or last-run after)]
-      (java.util.Date. (long (+ (.getTime base) (* (long interval) 60 1000)))))
+    (let [interval-ms (* (long interval) 60 1000)
+          ^java.util.Date anchor (or last-run after)
+          anchor-ms (.getTime anchor)
+          after-ms  (.getTime after)
+          candidate (+ anchor-ms interval-ms)
+          steps     (if (> candidate after-ms)
+                      1
+                      (inc (quot (- after-ms anchor-ms) interval-ms)))]
+      (java.util.Date. (long (+ anchor-ms (* steps interval-ms)))))
     ;; Calendar mode
-    (let [norm  (normalize spec)
+    (let [^java.util.Date floor (if (and last-run
+                                         (.after ^java.util.Date last-run after))
+                                  last-run
+                                  after)
+          norm  (normalize spec)
           zone  (ZoneId/systemDefault)
-          start (-> after .toInstant (.atZone zone) .toLocalDateTime
+          floor-instant (.toInstant floor)
+          start (-> floor .toInstant (.atZone zone) .toLocalDateTime
                     (.plusMinutes 1) (.withSecond 0) (.withNano 0))
           limit (.plusYears start 1)
           {:keys [minute hour month]} norm]
@@ -143,7 +166,8 @@
             (recur (.plusMinutes t 1))
 
             :else
-            (java.util.Date/from (.toInstant (.atZone t zone)))))))))
+            (or (calendar-date-after zone t floor-instant)
+                (recur (.plusMinutes t 1)))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Human-readable description
