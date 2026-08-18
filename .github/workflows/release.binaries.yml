@@ -11,6 +11,7 @@ permissions:
   contents: read
 
 env:
+  JAVA_VERSION: "21.0.8+9.0.LTS"
   GRAALVM_VERSION: "25.1.3"
   GRYPE_VERSION: "v0.110.0"
 
@@ -27,7 +28,7 @@ jobs:
         uses: actions/setup-java@v5.7.0
         with:
           distribution: temurin
-          java-version: "21.0.8+9"
+          java-version: ${{ env.JAVA_VERSION }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v6.4.0
@@ -47,7 +48,7 @@ jobs:
           path: |
             ~/.m2/repository
             ~/.lein/self-installs
-          key: lein-${{ runner.os }}-java-21.0.8-lein-2.11.2-${{ hashFiles('build/dependencies.edn', 'project.clj') }}
+          key: lein-${{ runner.os }}-java-${{ env.JAVA_VERSION }}-lein-2.11.2-${{ hashFiles('build/dependencies.edn', 'project.clj') }}
           restore-keys: |
             lein-${{ runner.os }}-
 

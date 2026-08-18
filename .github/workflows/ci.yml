@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  JAVA_VERSION: "21.0.8+9"
+  JAVA_VERSION: "21.0.8+9.0.LTS"
   LEIN_VERSION: "2.11.2"
   GRAALVM_VERSION: "25.1.3"
   GRYPE_VERSION: "v0.110.0"

@@ -25,7 +25,8 @@
                    :repl-options {:init-ns user}}
              :quality {:plugins [[dev.weavejester/lein-cljfmt "0.13.1"]
                                  [jonase/eastwood "1.4.3"]]}
-             :coverage {:plugins [[lein-cloverage "1.2.4"]]}
+             :coverage {:dependencies ~(:test-dependencies xia-dependency-catalog)
+                        :plugins [[lein-cloverage "1.2.4"]]}
              :uberjar {:aot :all}
              :release {:source-paths ^:replace ["src"]
                        :resource-paths ^:replace ["resources"]
