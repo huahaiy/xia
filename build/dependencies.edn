@@ -1,7 +1,7 @@
 {:dependencies
  [[org.clojure/clojure "1.12.5"]
   [integrant/integrant "1.0.1"]
-  [org.datalevin/datalevin-embedded "1.0.0"]
+  [org.datalevin/datalevin-embedded "1.0.2"]
   [org.clojure/tools.cli "1.4.256"]
   [com.cnuernber/charred "1.041"]
   ;; Datalevin -> jsonista currently resolves Jackson 2.21.2. Keep the

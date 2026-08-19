@@ -288,10 +288,15 @@
 
 (defn- system-config
   [{:keys [db mode crypto-opts instance template-instance
-           instance-command runtime-overlay bind port web-dev] :as options}]
-  (let [connect-options (merge {:passphrase-provider (startup-passphrase-provider mode)
-                                :instance-id instance}
-                               crypto-opts)]
+           instance-command runtime-overlay bind port web-dev native-smoke?]
+    :as options}]
+  (let [connect-options (cond-> (merge {:passphrase-provider
+                                        (startup-passphrase-provider mode)
+                                        :instance-id instance}
+                                       crypto-opts)
+                          (or native-smoke?
+                              (truthy-env-value? "XIA_NATIVE_SMOKE"))
+                          production-smoke/with-native-smoke-embedding-provider)]
     {:xia/runtime-overlay
      {:overlay-path runtime-overlay}
 
@@ -714,7 +719,9 @@
           (System/exit 1))
 
       :else
-      (let [options* (apply-run-defaults (assoc options :mode "server"))
+      (let [options* (apply-run-defaults (assoc options
+                                                :mode "server"
+                                                :native-smoke? true))
             cleanup  (make-cleanup options*)]
         (try
           (initialize-runtime! options* base-runtime-root-keys)

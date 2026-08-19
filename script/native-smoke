@@ -37,6 +37,7 @@ command -v curl >/dev/null 2>&1 || fail "curl is required"
 command -v python3 >/dev/null 2>&1 || fail "python3 is required to reserve a loopback port"
 
 export XIA_MASTER_KEY="${XIA_NATIVE_SMOKE_MASTER_KEY:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}"
+export XIA_NATIVE_SMOKE=1
 export XIA_WORKSPACE_ROOT="$SMOKE_ROOT/workspace"
 
 pick_port() {
@@ -106,6 +107,7 @@ fi
 grep -q 'Production smoke passed' "$RUNTIME_LOG" || fail "smoke command did not finish cleanly"
 
 grep -Eq '^schema_version=[1-9][0-9]*$' "$RESULT_PATH" || fail "invalid schema version result"
+assert_result "embedding_status=ok"
 assert_result "ciphertext_prefix=enc:v1:"
 assert_result "sci_blocked=4"
 assert_result "permission_handler_ran=false"

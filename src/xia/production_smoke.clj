@@ -5,6 +5,7 @@
    They are not exposed to SCI and should only be run against disposable state."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
+            [datalevin.embedding :as emb]
             [xia.browser.playwright :as playwright]
             [xia.db :as db]
             [xia.db-schema :as db-schema]
@@ -15,6 +16,89 @@
 (def ^:private smoke-secret-key :credential/native-smoke)
 (def ^:private smoke-handler-key :user/native-smoke-handler)
 (def ^:private smoke-secret "xia-native-smoke-secret-value")
+(def ^:private smoke-embedding-dimensions 32)
+
+(def ^:private smoke-embedding-metadata
+  {:embedding/provider {:kind :test
+                        :id :xia-native-smoke
+                        :model-id "xia-native-smoke-embedder"}
+   :embedding/output   {:dimensions smoke-embedding-dimensions
+                        :normalize? true}
+   :embedding/artifact {:format :memory
+                        :file "xia-native-smoke-embedder"}})
+
+(defn- embedding-item-text
+  [item]
+  (cond
+    (string? item) item
+    (map? item)    (or (:text item) "")
+    :else          (str item)))
+
+(defn- embedding-tokens
+  [item]
+  (->> (str/split (str/lower-case (embedding-item-text item)) #"[^\p{Alnum}]+")
+       (remove str/blank?)))
+
+(defn- normalize-embedding
+  [values]
+  (let [norm (Math/sqrt
+              (reduce (fn [sum value]
+                        (+ (double sum)
+                           (* (double value) (double value))))
+                      0.0
+                      values))]
+    (if (pos? norm)
+      (mapv #(float (/ (double %) norm)) values)
+      values)))
+
+(defn- embed-item
+  [item]
+  (normalize-embedding
+   (reduce (fn [values token]
+             (let [slot (Math/floorMod (int (hash token))
+                                       (int smoke-embedding-dimensions))]
+               (update values slot + 1.0)))
+           (vec (repeat smoke-embedding-dimensions 0.0))
+           (embedding-tokens item))))
+
+(defn- truncate-embedding-item
+  [item max-tokens]
+  (let [text (->> (embedding-tokens item)
+                  (take max-tokens)
+                  (str/join " "))]
+    (if (map? item)
+      (assoc item :text text)
+      text)))
+
+(deftype NativeSmokeEmbeddingProvider []
+  emb/IEmbeddingProvider
+  (embedding [_ items _opts]
+    (mapv embed-item items))
+  (embedding-metadata [_]
+    smoke-embedding-metadata)
+  (embedding-dimensions [_]
+    smoke-embedding-dimensions)
+  (close-provider [_]
+    nil)
+
+  emb/ITokenCounter
+  (token-count* [_ item _opts]
+    (count (embedding-tokens item)))
+  (truncate-item* [_ item max-tokens _opts]
+    (truncate-embedding-item item max-tokens))
+
+  java.lang.AutoCloseable
+  (close [_]
+    nil))
+
+(defn with-native-smoke-embedding-provider
+  "Install the deterministic, network-free provider used only by native smoke."
+  [connect-options]
+  (let [provider-id (get-in (db/default-datalevin-opts)
+                            [:embedding-opts :provider])]
+    (assoc-in (or connect-options {})
+              [:datalevin-opts :embedding-providers provider-id]
+              (NativeSmokeEmbeddingProvider.))))
 
 (defn- fail!
   [check data]
@@ -65,6 +149,25 @@
               {:before before :history history})))
   {:version (db/schema-version)
    :resource (db/schema-resource-path)})
+
+(defn- check-embedding-provider!
+  []
+  (let [provider   (db/current-embedding-provider)
+        metadata   (some-> provider emb/embedding-metadata)
+        dimensions (some-> provider emb/embedding-dimensions)
+        vector      (some-> provider
+                            (emb/embedding ["native smoke embedding"] nil)
+                            first)]
+    (check! :embedding-provider
+            (and (= :xia-native-smoke
+                    (get-in metadata [:embedding/provider :id]))
+                 (= smoke-embedding-dimensions dimensions)
+                 (= smoke-embedding-dimensions (count vector)))
+            {:metadata metadata
+             :dimensions dimensions
+             :vector-dimensions (some-> vector count)})
+    {:status :ok
+     :dimensions dimensions}))
 
 (defn- raw-config-value
   [key]
@@ -176,7 +279,7 @@
      :turn-count (count (db/task-turns task-id))}))
 
 (defn- write-result!
-  [output {:keys [schema secret sci permission task browser]}]
+  [output {:keys [schema embedding secret sci permission task browser]}]
   (when output
     (let [file (io/file output)]
       (when-let [parent (.getParentFile file)]
@@ -185,6 +288,7 @@
             (str "task_id=" (get task :task-id) "\n"
                  "session_id=" (get permission :session-id) "\n"
                  "schema_version=" (get schema :version) "\n"
+                 "embedding_status=" (name (get embedding :status)) "\n"
                  "ciphertext_prefix=" (get secret :ciphertext-prefix) "\n"
                  "sci_blocked=" (get sci :blocked-count) "\n"
                  "permission_handler_ran=" (get permission :handler-ran?) "\n"
@@ -195,6 +299,7 @@
   "Run finite production checks against the current disposable Xia runtime."
   [& {:keys [output skip-browser?]}]
   (let [schema     (check-schema!)
+        embedding  (check-embedding-provider!)
         secret     (check-secret-encryption!)
         sci        (check-sci!)
         permission (check-permission-before-handler!)
@@ -204,6 +309,7 @@
                      (playwright/production-smoke!))
         result     {:status :ok
                     :schema schema
+                    :embedding embedding
                     :secret secret
                     :sci sci
                     :permission permission
