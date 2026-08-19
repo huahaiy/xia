@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { lstat, readFile, readdir } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 
-const targets = [
+const supportedTargets = [
   { name: 'macos-arm64', binary: 'xia', executable: true },
   { name: 'linux-amd64', binary: 'xia', executable: true },
   { name: 'linux-arm64', binary: 'xia', executable: true },
@@ -12,6 +12,23 @@ const targets = [
 function fail(message) {
   throw new Error(message);
 }
+
+function selectedTargets() {
+  const requested = process.env.XIA_RELEASE_TARGETS?.trim();
+  if (!requested) return supportedTargets;
+
+  const names = requested.split(/\s+/);
+  if (new Set(names).size !== names.length) {
+    fail('XIA_RELEASE_TARGETS must not contain duplicate targets.');
+  }
+  return names.map((name) => {
+    const target = supportedTargets.find((candidate) => candidate.name === name);
+    if (!target) fail(`Unsupported release target: ${name}.`);
+    return target;
+  });
+}
+
+const targets = selectedTargets();
 
 function sorted(values) {
   return [...values].sort((left, right) => left.localeCompare(right, 'en'));

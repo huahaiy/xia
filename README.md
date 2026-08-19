@@ -56,8 +56,12 @@ Defaults:
   extracting or installing anything
 - every release ZIP includes `SBOM.cdx.json`, and the same target-specific
   CycloneDX 1.6 SBOM is published as a separate release asset
-- every ZIP, checksum, and standalone SBOM has signed GitHub build provenance;
-  the matching Sigstore bundle is also published as a release asset
+- Linux and Windows ZIPs, checksums, and standalone SBOMs have signed GitHub
+  Actions build provenance; the matching Sigstore bundle is also published as
+  a release asset
+- the macOS ARM64 archive is built and uploaded separately by the maintainer,
+  so it is protected by its SHA-256 sidecar but is not covered by the release
+  workflow's build attestation
 
 To pin a specific version on macOS / Linux:
 
@@ -69,7 +73,7 @@ To verify that a downloaded release archive was produced by Xia's release
 workflow, install the GitHub CLI and run:
 
 ```bash
-gh attestation verify xia-v0.1.0-macos-arm64.zip \
+gh attestation verify xia-v0.1.0-linux-amd64.zip \
   --repo huahaiy/xia \
   --signer-workflow huahaiy/xia/.github/workflows/release.binaries.yml
 ```
@@ -77,6 +81,18 @@ gh attestation verify xia-v0.1.0-macos-arm64.zip \
 This verifies the Sigstore signature, artifact digest, source repository, and
 signing workflow. The `.provenance.sigstore.json` release asset preserves the
 same verification bundle for auditing and offline-verification workflows.
+
+Maintainers build and upload the macOS ARM64 archive from a clean checkout of
+the release tag on an Apple Silicon Mac:
+
+```bash
+script/upload-macos-release v0.1.0
+```
+
+The script builds and smoke-tests Xia, generates the SBOM, packages and verifies
+the archive, and uploads the ZIP, checksum, and standalone SBOM to the existing
+GitHub release. Pass `--binary target/native-image/xia` to reuse an existing
+build; pass `--clobber` only when intentionally replacing release assets.
 
 ## Quick Start
 

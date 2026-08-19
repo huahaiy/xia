@@ -1,0 +1,210 @@
+#!/bin/bash
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+REPOSITORY="${XIA_GITHUB_REPO:-huahaiy/xia}"
+TAG=""
+BINARY_PATH=""
+CLOBBER=0
+
+usage() {
+  cat <<'EOF'
+Build, package, verify, and upload the Xia macOS ARM64 release assets.
+
+Usage:
+  script/upload-macos-release [options] <tag>
+
+Options:
+  --repo <owner/repo>  GitHub repository (default: huahaiy/xia)
+  --binary <path>      Package an existing binary instead of building Xia
+  --clobber            Replace existing local and GitHub release assets
+  -h, --help           Show this help
+
+Examples:
+  script/upload-macos-release v0.1.0
+  script/upload-macos-release --binary target/native-image/xia v0.1.0
+
+The current checkout must be clean and at the requested tag. Set GRAALVM_HOME
+or put native-image on PATH when building the binary.
+EOF
+}
+
+fail() {
+  printf >&2 'macOS release upload failed: %s\n' "$*"
+  exit 1
+}
+
+require_value() {
+  option="$1"
+  value="${2:-}"
+  [ -n "$value" ] || {
+    printf >&2 'Missing value for %s.\n' "$option"
+    exit 2
+  }
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --repo)
+      require_value "$1" "${2:-}"
+      REPOSITORY="$2"
+      shift 2
+      ;;
+    --binary)
+      require_value "$1" "${2:-}"
+      BINARY_PATH="$2"
+      shift 2
+      ;;
+    --clobber)
+      CLOBBER=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -*)
+      printf >&2 'Unknown option: %s\n\n' "$1"
+      usage >&2
+      exit 2
+      ;;
+    *)
+      if [ -n "$TAG" ]; then
+        printf >&2 'Unexpected argument: %s\n\n' "$1"
+        usage >&2
+        exit 2
+      fi
+      TAG="$1"
+      shift
+      ;;
+  esac
+done
+
+if [ -z "$TAG" ]; then
+  usage >&2
+  exit 2
+fi
+[[ "$TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] \
+  || fail "tag cannot be used safely in an asset filename: $TAG"
+[[ "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
+  || fail "invalid GitHub repository: $REPOSITORY"
+
+[ "$(uname -s)" = "Darwin" ] || fail "this script must run on macOS"
+case "$(uname -m)" in
+  arm64|aarch64) ;;
+  *) fail "this script must run on an ARM64 Mac" ;;
+esac
+
+for command in gh git lein lipo node shasum unzip zip; do
+  command -v "$command" >/dev/null 2>&1 || fail "required command is missing: $command"
+done
+
+tag_commit="$(git -C "$ROOT_DIR" rev-parse --verify "refs/tags/$TAG^{commit}" 2>/dev/null)" \
+  || fail "local tag does not exist: $TAG"
+head_commit="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+[ "$head_commit" = "$tag_commit" ] \
+  || fail "HEAD is not at $TAG ($tag_commit)"
+if ! git -C "$ROOT_DIR" diff --quiet --ignore-submodules -- \
+    || ! git -C "$ROOT_DIR" diff --cached --quiet --ignore-submodules --; then
+  fail "tracked files differ from $TAG; commit or restore them before building"
+fi
+untracked_build_input="$(
+  git -C "$ROOT_DIR" ls-files --others --exclude-standard -- \
+    src resources build project.clj | sed -n '1p'
+)"
+[ -z "$untracked_build_input" ] \
+  || fail "untracked build input would make the release non-reproducible: $untracked_build_input"
+
+gh auth status >/dev/null 2>&1 || fail "GitHub CLI is not authenticated; run gh auth login"
+gh release view "$TAG" --repo "$REPOSITORY" >/dev/null \
+  || fail "GitHub release does not exist or is not accessible: $REPOSITORY@$TAG"
+
+TARGET="macos-arm64"
+STEM="xia-$TAG-$TARGET"
+ARCHIVE_NAME="$STEM.zip"
+CHECKSUM_NAME="$ARCHIVE_NAME.sha256"
+SBOM_NAME="$STEM.cdx.json"
+OUTPUT_DIR="$ROOT_DIR/target/release/$TAG"
+
+for asset_name in "$ARCHIVE_NAME" "$CHECKSUM_NAME" "$SBOM_NAME"; do
+  if [ -e "$OUTPUT_DIR/$asset_name" ] && [ "$CLOBBER" -ne 1 ]; then
+    fail "local asset already exists: $OUTPUT_DIR/$asset_name (use --clobber to replace it)"
+  fi
+done
+
+if [ -z "$BINARY_PATH" ]; then
+  bash "$ROOT_DIR/script/compile-native"
+  BINARY_PATH="$ROOT_DIR/target/native-image/xia"
+else
+  case "$BINARY_PATH" in
+    /*) ;;
+    *) BINARY_PATH="$ROOT_DIR/$BINARY_PATH" ;;
+  esac
+fi
+
+[ -x "$BINARY_PATH" ] || fail "native binary is not executable: $BINARY_PATH"
+binary_architectures="$(lipo -archs "$BINARY_PATH" 2>/dev/null)" \
+  || fail "could not inspect native binary architecture: $BINARY_PATH"
+[ "$binary_architectures" = "arm64" ] \
+  || fail "native binary must contain only arm64 code; found: $binary_architectures"
+
+bash "$ROOT_DIR/script/native-smoke" "$BINARY_PATH"
+
+mkdir -p "$ROOT_DIR/target"
+STAGING_DIR="$(mktemp -d "$ROOT_DIR/target/macos-release.XXXXXX")"
+cleanup() {
+  rm -rf "$STAGING_DIR"
+}
+trap cleanup EXIT INT TERM
+
+ASSET_DIR="$STAGING_DIR/assets"
+PACKAGE_PARENT="$STAGING_DIR/package"
+PACKAGE_DIR="$PACKAGE_PARENT/$STEM"
+EXTRACTED_DIR="$STAGING_DIR/extracted"
+mkdir -p "$ASSET_DIR" "$PACKAGE_DIR" "$EXTRACTED_DIR/$TARGET"
+
+maven_home="$(sh "$ROOT_DIR/script/setup-maven")"
+XIA_MAVEN="$maven_home/bin/mvn" \
+XIA_SBOM_WORK_DIR="$STAGING_DIR/sbom-work" \
+  sh "$ROOT_DIR/script/generate-sbom" \
+    "$TAG" "$TARGET" "$BINARY_PATH" "$ASSET_DIR/$SBOM_NAME"
+
+cp "$BINARY_PATH" "$PACKAGE_DIR/xia"
+chmod 755 "$PACKAGE_DIR/xia"
+cp "$ROOT_DIR/README.md" "$ROOT_DIR/LICENSE" "$PACKAGE_DIR/"
+cp "$ASSET_DIR/$SBOM_NAME" "$PACKAGE_DIR/SBOM.cdx.json"
+
+(
+  cd "$PACKAGE_PARENT"
+  COPYFILE_DISABLE=1 zip -X -q -r "$ASSET_DIR/$ARCHIVE_NAME" "$STEM"
+)
+(
+  cd "$ASSET_DIR"
+  shasum -a 256 "$ARCHIVE_NAME" > "$CHECKSUM_NAME"
+)
+unzip -tq "$ASSET_DIR/$ARCHIVE_NAME" >/dev/null \
+  || fail "archive integrity check failed: $ARCHIVE_NAME"
+unzip -q "$ASSET_DIR/$ARCHIVE_NAME" -d "$EXTRACTED_DIR/$TARGET"
+XIA_RELEASE_TARGETS="$TARGET" \
+  node "$ROOT_DIR/script/release-canary.mjs" verify-packages \
+    "$ASSET_DIR" "$EXTRACTED_DIR" "$TAG"
+
+mkdir -p "$OUTPUT_DIR"
+for asset_name in "$ARCHIVE_NAME" "$CHECKSUM_NAME" "$SBOM_NAME"; do
+  mv -f "$ASSET_DIR/$asset_name" "$OUTPUT_DIR/$asset_name"
+done
+
+upload_assets=(
+  "$OUTPUT_DIR/$ARCHIVE_NAME"
+  "$OUTPUT_DIR/$CHECKSUM_NAME"
+  "$OUTPUT_DIR/$SBOM_NAME"
+)
+if [ "$CLOBBER" -eq 1 ]; then
+  gh release upload "$TAG" "${upload_assets[@]}" --repo "$REPOSITORY" --clobber
+else
+  gh release upload "$TAG" "${upload_assets[@]}" --repo "$REPOSITORY"
+fi
+
+printf 'Uploaded Xia %s macOS ARM64 release assets to %s.\n' "$TAG" "$REPOSITORY"
+printf 'Local assets: %s\n' "$OUTPUT_DIR"

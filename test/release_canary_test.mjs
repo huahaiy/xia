@@ -21,21 +21,29 @@ function hash(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function run(assetRoot, extractedRoot) {
+function run(assetRoot, extractedRoot, selectedTargets) {
+  const env = { ...process.env };
+  delete env.XIA_RELEASE_TARGETS;
+  if (selectedTargets) {
+    env.XIA_RELEASE_TARGETS = selectedTargets.map(({ name }) => name).join(' ');
+  }
   return spawnSync(
     process.execPath,
     [script.pathname, 'verify', assetRoot, extractedRoot, version],
-    { encoding: 'utf8' },
+    {
+      encoding: 'utf8',
+      env,
+    },
   );
 }
 
-async function fixture() {
+async function fixture(selectedTargets = targets) {
   const root = await mkdtemp(join(tmpdir(), 'xia-release-canary-test-'));
   const assetRoot = join(root, 'assets');
   const extractedRoot = join(root, 'extracted');
   await Promise.all([mkdir(assetRoot), mkdir(extractedRoot)]);
 
-  for (const { name: target, binary, executable } of targets) {
+  for (const { name: target, binary, executable } of selectedTargets) {
     const stem = `xia-${version}-${target}`;
     const archiveName = `${stem}.zip`;
     const archive = Buffer.from(`zip fixture for ${target}`);
@@ -88,6 +96,16 @@ test('accepts the exact four-target release candidate', async (t) => {
   t.after(() => rm(root, { recursive: true, force: true }));
 
   const result = run(assetRoot, extractedRoot);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Release candidate metadata passed/);
+});
+
+test('accepts the three-target GitHub release candidate', async (t) => {
+  const ciTargets = targets.filter(({ name }) => name !== 'macos-arm64');
+  const { root, assetRoot, extractedRoot } = await fixture(ciTargets);
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const result = run(assetRoot, extractedRoot, ciTargets);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Release candidate metadata passed/);
 });

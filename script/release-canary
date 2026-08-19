@@ -7,6 +7,9 @@ ASSET_DIR="${1:-}"
 VERSION="${2:-}"
 CANARY_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/xia-release-canary.XXXXXX")"
 TARGETS=(macos-arm64 linux-amd64 linux-arm64 windows-amd64)
+if [ -n "${XIA_RELEASE_TARGETS:-}" ]; then
+  read -r -a TARGETS <<<"$XIA_RELEASE_TARGETS"
+fi
 
 fail() {
   echo "release canary failed: $*" >&2

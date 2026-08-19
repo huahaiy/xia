@@ -244,7 +244,7 @@ jobs:
       - installer-integrity
     runs-on: ubuntu-24.04
     env:
-      XIA_NATIVE_IMAGE_HEAP: 7g
+      XIA_NATIVE_IMAGE_HEAP: 10g
     steps:
       - name: Checkout Xia
         uses: actions/checkout@v7.0.1

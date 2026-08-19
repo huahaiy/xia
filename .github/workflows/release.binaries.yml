@@ -83,10 +83,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # macOS arm64 is built and uploaded with script/upload-macos-release
+        # because the hosted runner lacks enough memory for native-image.
         include:
-          - runner: macos-14
-            target: macos-arm64
-            binary-name: xia
           - runner: ubuntu-24.04
             target: linux-amd64
             binary-name: xia
@@ -368,6 +367,7 @@ jobs:
       - name: Run packaged release canary
         env:
           GH_TOKEN: ${{ github.token }}
+          XIA_RELEASE_TARGETS: "linux-amd64 linux-arm64 windows-amd64"
         run: >-
           bash script/release-canary
           release-assets

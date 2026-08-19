@@ -25,7 +25,7 @@ test('release workflow grants signing permissions only to native builds', () => 
   );
 });
 
-test('release workflow attests and publishes every public release artifact', () => {
+test('release workflow attests and publishes every CI-produced release artifact', () => {
   const attestStart = workflow.indexOf('      - name: Generate release provenance');
   const uploadStart = workflow.indexOf('      - name: Upload workflow artifact');
   const canaryStart = workflow.indexOf('  canary:\n');
@@ -70,6 +70,7 @@ test('publication consumes only the candidate that passed the packaged canary', 
   const canary = workflow.slice(canaryStart, publishStart);
   assert.match(canary, /needs: build/);
   assert.match(canary, /bash script\/release-canary/);
+  assert.match(canary, /XIA_RELEASE_TARGETS: "linux-amd64 linux-arm64 windows-amd64"/);
   assert.match(canary, /name: release-candidate-\$\{\{ github\.run_id \}\}/);
   assert.match(canary, /overwrite: true/);
   assert.ok(
@@ -100,4 +101,14 @@ test('release canary validates every package before running the packaged Linux b
     canaryScript,
     /script\/native-smoke" \\\n  "\$CANARY_ROOT\/extracted\/linux-amd64\/xia-\$VERSION-linux-amd64\/xia"/,
   );
+});
+
+test('GitHub release builds exclude the locally produced macOS binary', () => {
+  const buildStart = workflow.indexOf('  build:\n');
+  const canaryStart = workflow.indexOf('  canary:\n');
+  const build = workflow.slice(buildStart, canaryStart);
+  assert.doesNotMatch(build, /target: macos-arm64/);
+  assert.match(build, /target: linux-amd64/);
+  assert.match(build, /target: linux-arm64/);
+  assert.match(build, /target: windows-amd64/);
 });
