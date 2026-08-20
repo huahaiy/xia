@@ -89,8 +89,14 @@ stop_server() {
     sed -n '1,240p' "$log_path" >&2
     fail "server exited with status $exit_code"
   fi
-  grep -q 'Server stopped' "$log_path" || fail "HTTP server did not report a clean stop"
-  grep -q 'Closing database' "$log_path" || fail "database did not report a clean close"
+  if ! grep -q 'Server stopped' "$log_path"; then
+    sed -n '1,260p' "$log_path" >&2
+    fail "HTTP server did not report a clean stop"
+  fi
+  if ! grep -q 'Closing database' "$log_path"; then
+    sed -n '1,260p' "$log_path" >&2
+    fail "database did not report a clean close"
+  fi
 }
 
 assert_result() {

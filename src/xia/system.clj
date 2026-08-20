@@ -100,9 +100,7 @@
   [_ component]
   (with-component-runtime-context
     component
-    #(do
-       (db/close!)
-       (db/clear-runtime!))))
+    db/clear-runtime!))
 
 (defmethod ig/init-key :xia/runtime-overlay
   [_ {:keys [overlay-path]}]

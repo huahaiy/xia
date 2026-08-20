@@ -2,8 +2,19 @@
   (:require [clojure.test :refer [deftest is]]
             [integrant.core :as ig]
             [xia.async]
+            [xia.db]
             [xia.runtime-context :as runtime-context]
             [xia.system]))
+
+(deftest database-halt-closes-and-clears-its-runtime-once
+  (let [calls     (atom 0)
+        runtime   (xia.db/make-runtime)
+        component {:runtime runtime
+                   :runtime-context
+                   (runtime-context/make {:xia/db {:runtime runtime}})}]
+    (with-redefs [xia.db/clear-runtime! #(swap! calls inc)]
+      (ig/halt-key! :xia/db component))
+    (is (= 1 @calls))))
 
 (deftest runtime-support-exposes-explicit-runtime-context
   (let [db-runtime    {:runtime-name :db}

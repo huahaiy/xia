@@ -13,6 +13,7 @@
             [xia.paths :as paths]
             [xia.logging :as logging]
             [xia.pack :as pack]
+            [xia.process-shutdown :as process-shutdown]
             [xia.production-smoke :as production-smoke]
             [xia.snapshot :as snapshot]
             [xia.runtime-context :as runtime-context]
@@ -652,22 +653,11 @@
 
 (defn- register-shutdown-hook!
   [cleanup]
-  (let [^String hook-name "xia-shutdown"
-        hook (Thread.
-              ^Runnable
-              (reify Runnable
-                (run [_]
-                  (cleanup)))
-              hook-name)]
-    (.addShutdownHook (Runtime/getRuntime) hook)
-    hook))
+  (process-shutdown/register! cleanup))
 
 (defn- remove-shutdown-hook!
-  [hook]
-  (try
-    (.removeShutdownHook (Runtime/getRuntime) hook)
-    (catch IllegalStateException _)
-    (catch IllegalArgumentException _)))
+  [registration]
+  (process-shutdown/remove! registration))
 
 (defn- run-pack!
   [args]

@@ -24,6 +24,7 @@
   xia.plugin-test
   xia.permission-test
   xia.prompt-test
+  xia.process-shutdown-test
   xia.runtime-overlay-test
   xia.schedule-test
   xia.secret-test
